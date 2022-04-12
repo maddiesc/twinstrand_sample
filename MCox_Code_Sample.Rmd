@@ -1,0 +1,399 @@
+---
+title: "Cox Sample"
+output: html_notebook
+---
+
+# Setup
+This notebook was prepared in R version 4.1.2 and RStudio v.2022.02.0.
+
+### About the Data
+
+This is a 16S rRNA (v4 region) amplicon sequencing data set from my thesis work. I was trying to determine if inoculation of pre-weaning dairy calves with rumen contents from adult donor cows of known historic milk production. It is known that rumen microbial community features are strongly correlated to milk production in dairy cattle. However, due to standard management practices in dairy there are few opportunities for vertical transmission of beneficial microbes from cow to calf after birth. In light of that, I am trying to seed the developing rumen with an exogenous rumen microbial community in the hopes that it will artificially provide for that vertical transmission and eventually result in lactation efficiency similar to that of the donor.
+
+Two adult donor cows were selected with different historic milk production. In this portion of the data set, I am interested in whether or not these two donor cows differ in bacterial community composition. The two donors are identified as historically high-efficiency (HE) and historically low-efficiency (LE).
+
+For this data set, I hypothesize that the HE and LE donors will have distinct bacterial communities as assessed by alpha and beta diversity metrics. I will also try to find some taxa which are differentially abundant in these two types of communities.
+
+### Load packages
+Package versions used in the creation of this notebook are indicated alongside package load.
+```{r}
+if (!require(vegan)) install.packages("vegan")
+if (!require(ggpubr)) install.packages("ggpubr")
+if (!require(beanplot)) install.packages("beanplot")
+if (!require(igraph)) install.packages("igraph")
+if (!require(Hmisc)) install.packages("Hmisc")
+if (!require(reshape2)) install.packages("reshape2")
+if (!require(dplyr)) install.packages("dplyr")
+
+library(vegan) # 2.5-7
+library(ggpubr) # 0.4.0
+library(beanplot) # 1.2
+library(igraph) # 1.2.11
+library(Hmisc) # 4.6-0
+library(reshape2) # 1.4.4
+library(dplyr) # 1.0.8
+```
+
+Current session info
+```{r}
+sessionInfo()
+```
+
+### Load data files & set seed
+The count matrix contains community composition data: samples are rows and taxa are columns. The metadata table contains information about which host the sample is derived from (HE or LE) and alpha diversity metrics which were calculated during sequence processing. The matrix file was normalized to 14,000 sequences/sample during preprocessing in mothur. 
+```{r}
+# metadata table containing sample information
+meta <- read.table("https://raw.githubusercontent.com/maddiesc/twinstrand_sample/main/meta_sample.txt", header = TRUE, row.names = 1, sep = "\t", na.strings = "NA")
+
+# matrix containing OTU counts by sample
+matrix <- read.table("https://raw.githubusercontent.com/maddiesc/twinstrand_sample/main/matrix_sample.txt", header = TRUE, sep = "\t", row.names = 1)
+
+# create a conditional column of colors for plotting
+meta$col <- ifelse(meta$cow == "HE", "#a50026", "#313695")
+
+# set seed for R random number generator for reproducibility
+set.seed(532)
+```
+
+Note: Actual row sums of the matrix file are not exactly 14,000 because normalization results in rounding, and those rounding errors accumulate over the nearly 30,000 taxa. Actual sequences/sample range from 13,771 to 14,850. 
+
+### Perform 0.1% abundance cutoff for OTU matrix
+In most cases in amplicon sequencing, very low abundance taxa are not of interest. The statistical and visualization methods we use to assess community differences are abundance weighted, and broad-scale conclusions tend not to change if low-abundance taxa are removed. But removing low-abundance taxa can make analysis much quicker and less computationally intensive. So as a matter of course I often remove taxa below 0.01% abundance. 
+```{r}
+# define function to perform abundance cutoff
+abund_cutoff <- function(otu_matrix, abund_threshold) {
+  read_total <- sum(rowSums(otu_matrix))
+  otu_abund <- otu_matrix[, which(apply(otu_matrix, 2, sum) > read_total * abund_threshold)]
+  otu_abund
+}
+
+matrix_abund <- abund_cutoff(matrix, 0.0001)
+
+```
+
+# Alpha diversity
+Alpha diversity measures within-sample diversity, like number of unique species or species dominance. For this section, we use two of the most common alpha diversity metrics: Shannon's diversity, which takes into account both number of taxa and their abundance, and Chao richness, which is an estimate of community richness based on observed taxa and number of rare taxa. 
+
+### Statistics
+Before performing the hypothesis test, we need to verify that the ANOVA test assumptions are met.
+```{r}
+# make anova models
+model_shannon <- lm(shannon ~ cow, data = meta)
+model_chao <- lm(chao ~ cow, data = meta)
+```
+
+The Shapiro-Wilkes test is a test of normality. It is very conservative, and ANOVA models tend to be fairly robust to non-normal data. Nonetheless, it is reassuring when it is not significant. In this data the normality assumption is not met according to this test.
+```{r}
+# test normality of alpha diversity metrics
+shapiro.test(meta$shannon)
+shapiro.test(meta$chao)
+```
+
+And graphically, the skew is obvious for both metrics. I find this to be a more helpful diagnostic than Shapiro-Wilkes. In both of these plots, the residuals deviate majorly from expected values at the tails. In this case, I would not feel comfortable running a hypothesis test that assumes normality.
+```{r}
+# make QQ plot of residuals
+ggqqplot(residuals(model_shannon))
+```
+
+```{r}
+ggqqplot(residuals(model_chao))
+```
+
+Because these metrics are clearly not normal, I will use a nonparametric alternative to an ANOVA model: a Kruskal-Wallis rank-sum test. 
+```{r}
+kt_shannon <- kruskal.test(meta$shannon, meta$cow)
+kt_chao <- kruskal.test(meta$chao, meta$cow)
+
+kt_shannon
+kt_chao
+```
+
+### Plotting
+I like to use beanplots rather than boxplots, particularly for skewed data. I feel that the inclusion of a density plot is really informative, where boxplots can be misleading because they don't tell viewers as much about where the data points are within the distribution. 
+```{r}
+par(mfrow = c(1, 2))
+
+beanplot(shannon ~ cow, data = meta, col = list("#a50026", "#313695"), border = TRUE, what = c(0, 1, 1, 0), ll = 0, log = "", ylab = "Shannon Diversity")
+
+legend("bottomleft", text.font = 3, legend = "P < 0.001", bty = "n")
+
+beanplot(chao ~ cow, data = meta, col = list("#a50026", "#313695"), border = TRUE, what = c(0, 1, 1, 0), ll = 0, log = "", ylab = "Chao Richness")
+
+legend("topright", text.font = 3, legend = "P < 0.001", bty = "n")
+```
+
+# Beta diversity
+Beta diversity expresses between-sample diversity. This requires creation of a distance matrix. There are a number of distance metrics that are applicable, but Bray-Curtis is the most commomly used in microbial community ecology. It is an abundance-weighted metric of compositional similarity. 
+
+### Statistics
+The "adonis" test is a permutational multivariate ANOVA that can be used to test for differences between groups of samples based on a distance matrix. This test shows that, statistically, the high- and low-efficiency donor cows have different bacterial community compositions. 
+```{r}
+ads <- adonis(matrix_abund ~ meta$cow, method = "bray", permutations = 999)
+ads
+```
+
+### Plotting
+Non-metric multidimensional scaling (NMDS) plots are commonly used to depict bacterial community similarity between groups of samples. In these plots, each point is a community, and points which are closer together are more similar in bacterial community structure.
+```{r}
+nmds <- metaMDS(matrix_abund, distance = "bray", trymax = 999, k = 2)
+```
+
+```{r}
+# extract coordinates from NMDS and set plot bounds
+scr <- as.data.frame(scores(nmds))
+xlim <- c(min(scr$NMDS1) - 0.1, max(scr$NMDS1) + 0.1)
+ylim <- c(min(scr$NMDS2) - 0.1, max(scr$NMDS2) + 0.1)
+
+plot(nmds, type = "n", xlim = xlim, ylim = ylim)
+points(nmds, display = "sites", col = meta$col, pch = 16)
+
+# add standard error ellipses
+ordiellipse(nmds, groups = meta$cow, label = TRUE)
+
+legend("topleft", text.font = 3, legend = c(paste("P = ", ads$aov.tab$`Pr(>F)`[1])), bty = "n")
+
+```
+
+In the above plot, I can confirm visually what I determined statistically: that inoculum samples derived from the high- and low-efficiency donors differed from each other. 
+
+# Specific Taxa of Interest
+It may be of interest to find some specific species that differentiate the high- and low-efficiency hosts. In this data set, "species" are described by operational taxonomic units, or OTUs, which were assigned at 97% sequence similarity during preprocessing. The SIMPER function utilizes Bray-Curtis dissimilarity and identifies taxa that drive distances between groups of samples.
+
+I can then take the biggest contributors to compositional differences between HE and LE samples and subject them to hypothesis testing. In this case, I will use nonparametric tests because OTU abundances are rarely normal.
+
+### Statistics
+```{r}
+# run simper and extract top 20 OTUs
+s <- simper(matrix_abund, meta$cow)
+simper_otus <- s$HE_LE$species[order(s$HE_LE$ord)]
+simper_otus <- simper_otus[1:20]
+
+# statistically test simper-implicated OTUs
+simper_p <- c()
+
+for (otu in simper_otus) {
+  t <- kruskal.test(matrix_abund[[otu]], meta$cow)
+  simper_p <- c(simper_p, t$p.value)
+}
+
+simper_p_adj <- p.adjust(simper_p, "fdr")
+
+simper_p_adj_plot <- ifelse(simper_p_adj < 0.001, "P < 0.001", paste("P = ", round(simper_p_adj, 3)))
+
+```
+
+### Plotting
+```{r, fig.width=5, fig.height=5}
+par(mfrow = c(4, 5), mar = c(3, 4, 1, 1), mgp = c(1.75, 0.7, 0))
+
+for (otu in simper_otus) {
+  boxplot(matrix_abund[[otu]] ~ meta$cow,
+    col = c("#a50026", "#313695"),
+    xlab = "Host",
+    ylab = otu,
+    ylim = c(0.9 * min(matrix_abund[[otu]]), 1.5 * max(matrix_abund[[otu]]))
+  )
+
+  legend("topleft",
+    text.font = 3,
+    legend = simper_p_adj_plot[which(simper_otus == otu)],
+    bty = "n",
+    cex = 1
+  )
+}
+```
+Several of these OTUs differ between the HE and LE hosts, which may help to drive the differences we see at the community level. Next steps could include looking for abundance of these taxa in treatment cows. All 20 of the OTUs implicated by SIMPER are in the top 40 most abundant OTUs in the data set. This is one of the limitations of SIMPER; it is extremely sensitive to high-abundance taxa. So I usually couple SIMPER analysis with other methods of finding differentially abundant taxa. Some options include Maaslin2, DESeq2, ANCOM-BC, LEfSe, etc. I have chosen to show SIMPER here because it is quick, easy, and requires no reformatting of input data.
+
+# Network Analysis
+Another way to find OTUs which are important within a community is by analysis of correlation networks. OTUs which have high "degree centrality" may have a strong influence on community dynamics in that environment.  Degree centrality refers to the number of spokes off of a network node, or the number of strong, significant correlations a given species has to other species in the environment.
+
+### Generate networks
+igraph networks makes use of species correlation matrices, so I will generate these for each of the hosts separately. I will use Spearman rank-sum correlations because they do not make assumptions about the distributions of underlying data. Additionally, I am going to do a more stringent abundance cutoff of 0.1% within the group because networks with large numbers of taxa are slow and difficult to interpret.
+```{r}
+# create correlation matrices within group
+group_list <- c("HE", "LE")
+
+for (group in group_list) {
+
+  # create data frames by host
+  assign(paste("matrix_abund_", group, sep = ""), matrix_abund[which(meta$cow == group), ])
+  assign(paste("meta_", group, sep = ""), meta[which(meta$cow == group), ])
+
+  # remove lower abundance reads
+  assign(
+    paste("matrix_abund_", group, sep = ""),
+    abund_cutoff(eval(as.name(paste("matrix_abund_", group, sep = ""))), 0.001)
+  )
+
+  # recast as matrices
+  assign(
+    paste("matrix_abund_", group, sep = ""),
+    as.matrix(eval(as.name(paste("matrix_abund_", group, sep = ""))))
+  )
+
+  # calculate pearson correlations between all OTUs within group
+  assign(
+    paste("corr_", group, sep = ""),
+    rcorr(eval(as.name(paste("matrix_abund_", group, sep = ""))), type = "spearman")
+  )
+}
+```
+
+To build the networks, igraph requires these matrices be flattened. Here, I will create data frames which contain the two OTUs being compared, the Spearman coefficient, and the p-value assigned to the correlation.
+```{r}
+# flatten correlation matrices
+pval_matrix_HE <- corr_HE$P
+rval_matrix_HE <- corr_HE$r
+
+pval_matrix_LE <- corr_LE$P
+rval_matrix_LE <- corr_LE$r
+
+flatten <- function(coeff, pval) {
+  c <- coeff
+  c[upper.tri(c, diag = TRUE)] <- NA
+  c <- melt(c, varnames = c("row", "col"), na.rm = TRUE)
+  p <- pval
+  p[upper.tri(p, diag = TRUE)] <- NA
+  p <- melt(p, varnames = c("row", "col"), na.rm = TRUE)
+  df <- data.frame(c, p$value)
+  df
+}
+
+corr_HE_flat <- flatten(rval_matrix_HE, pval_matrix_HE)
+corr_LE_flat <- flatten(rval_matrix_LE, pval_matrix_LE)
+
+```
+
+Generally it is most useful to plot correlations between OTUs that are strong and statistically significant. To simplify the network plots and make them more readable, I will eliminate weak correlations and those whose p-values exceed 0.001. 
+```{r}
+# filter out weak and insignificant correlations
+corr_HE_flat <- corr_HE_flat[which(corr_HE_flat$p < 0.001 & abs(corr_HE_flat$value) > 0.7), ]
+corr_LE_flat <- corr_LE_flat[which(corr_LE_flat$p < 0.001 & abs(corr_LE_flat$value) > 0.7), ]
+
+# generate networks
+net_HE <- graph_from_data_frame(corr_HE_flat, vertices = names(matrix_abund_HE), directed = FALSE)
+net_LE <- graph_from_data_frame(corr_LE_flat, vertices = names(matrix_abund_LE), directed = FALSE)
+
+net_HE <- add_layout_(net_HE, with_dh())
+net_LE <- add_layout_(net_LE, with_dh())
+```
+
+### Plot Networks
+First I will alter my network plots a bit to make them more readable. 
+```{r}
+# change node size to indicate degree centrality
+V(net_HE)$degree <- degree(net_HE, v = V(net_HE), loops = FALSE, normalized = FALSE)
+V(net_LE)$degree <- degree(net_LE, v = V(net_LE), loops = FALSE, normalized = FALSE)
+
+max_degree <- max(c(V(net_HE)$degree, V(net_LE)$degree))
+max_corr <- max(c(abs(E(net_HE)$value), abs(E(net_LE)$value)))
+V(net_LE)$size <- 20 * V(net_LE)$degree / max_degree
+V(net_HE)$size <- 20 * V(net_HE)$degree / max_degree
+
+# change edge weight to indicate strength of correlation
+E(net_HE)$width <- 2 * abs(E(net_HE)$value) / max_corr
+E(net_LE)$width <- 2 * abs(E(net_LE)$value) / max_corr
+
+# change edge color to indicate positive or negative correlation
+E(net_HE)$color <- ifelse(E(net_HE)$value > 0, "#FFCCCC", "#CCCCFF")
+E(net_LE)$color <- ifelse(E(net_LE)$value > 0, "#FFCCCC", "#CCCCFF")
+
+# change node color
+V(net_HE)$color <- c("#a50026")
+V(net_LE)$color <- c("#313695")
+```
+
+In the networks below, I can see that communities from the HE donor have a small number of highly central taxa relative to the LE donor, which has a more dispersed network with fewer very highly influential nodes. This is true despite the fact that HE communities are more diverse and species rich. 
+```{r}
+par(mfrow = c(1, 2), mar = c(1, 1, 1, 1))
+
+plot(net_HE, vertex.label = NA, main = "HE")
+plot(net_LE, vertex.label = NA, main = "LE")
+
+legend("bottomright", col = c("#FFCCCC", "#CCCCFF"), legend = c("positive", "negative"), lty = 1, bty = "n")
+```
+
+I can statistically test this and visualize it by plotting the degree centrality by group. 
+```{r}
+deg_HE <- data.frame(OTU = V(net_HE)$name, degree = V(net_HE)$degree, cow = "HE")
+deg_LE <- data.frame(OTU = V(net_LE)$name, degree = V(net_LE)$degree, cow = "LE")
+
+deg_test <- rbind(deg_HE, deg_LE)
+
+kt_deg <- kruskal.test(degree ~ cow, data = deg_test)
+kt_deg
+```
+
+```{r}
+beanplot(degree ~ cow, data = deg_test, col = list("#a50026", "#313695"), border = TRUE, what = c(0, 1, 1, 0), ll = 0, log = "", ylab = "Degree Centrality of Nodes")
+
+legend("topleft", text.font = 3, legend = c(paste("P = ", round(kt_deg$p.value, 3))), bty = "n")
+```
+
+So it is true that the LE network has higher average centrality of nodes, and HE networks just have a super long upper tail of highly influential nodes and a large number of low-centrality nodes. Moving forward, it would be valuable to find out the taxonomic classification of these highly influential HE network nodes and try to hypothesize their role in the ruminal fiber degrading community.
+
+### Evaluate Influential Taxa
+I can then extract the most important ~10 nodes from these networks to create a list of taxa for hypothesis testing. The degree values have a lot of ties, so I will use a subsetting method that allows for ties.
+```{r}
+extract_top_degree <- function(network, ntaxa) {
+  deg_df <- data.frame(
+    OTU = V(network)$name,
+    degree = degree(network,
+      v = V(network),
+      loops = FALSE, normalized = FALSE
+    )
+  )
+  deg_df <- deg_df[order(deg_df$degree, decreasing = TRUE), ]
+  top <- deg_df %>% top_n(ntaxa, degree)
+  top$OTU
+}
+
+deg_list_HE <- extract_top_degree(net_HE, 10)
+deg_list_LE <- extract_top_degree(net_LE, 10)
+
+deg_list <- unique(c(deg_list_HE, deg_list_LE))
+
+length(deg_list)
+```
+
+Then I can perform Kruskall-Wallis tests as demonstrated above for SIMPER.
+```{r}
+# statistically test deg-implicated OTUs
+deg_p <- c()
+
+for (otu in deg_list) {
+  t <- kruskal.test(matrix_abund[[otu]], meta$cow)
+  deg_p <- c(deg_p, t$p.value)
+}
+
+deg_p_adj <- p.adjust(deg_p, "fdr")
+
+deg_p_adj_plot <- ifelse(deg_p_adj < 0.001, "P < 0.001", paste("P = ", round(deg_p_adj, 3)))
+
+```
+
+And make boxplots
+```{r, fig.width=5, fig.height=8}
+par(mfrow = c(7, 3), mar = c(3, 4, 1, 1), mgp = c(1.75, 0.7, 0))
+
+for (otu in deg_list) {
+  boxplot(matrix_abund[[otu]] ~ meta$cow,
+    col = c("#a50026", "#313695"),
+    xlab = "Host",
+    ylab = otu,
+    ylim = c(0.9 * min(matrix_abund[[otu]]), 1.5 * max(matrix_abund[[otu]]))
+  )
+
+  legend("topleft",
+    text.font = 3,
+    legend = deg_p_adj_plot[which(deg_list == otu)],
+    bty = "n",
+    cex = 1
+  )
+}
+```
+Again, most of these OTUs differ between my HE and LE donors. Next steps could include looking at the abundance of these taxa in the treatment cohorts.  
+
+# Conclusions
+This analysis concluded that inoculum samples derived from HE and LE hosts have distinct bacterial communities. HE inoculum samples are more diverse and species rich and have a distinct bacterial community structure relative to LE inoculum samples. LE inoculum samples have a more fairly distributed network with lots of nodes of middling importance. The HE network has a small number of very influential nodes indicating that relatively few species have an outsized influence on community dynamics. There are also a number of OTUs which are differentially abundant between HE and LE samples. Next steps would include taking a closer look at the taxonomic classifications of the OTUs implicated by SIMPER and important in the networks to try to understand how they may contribute to differences in community function. Additionally, it would be valuable to test the relative abundances of these taxa in the treatment cohorts to see if inoculation imparted functionally or ecologically important bacterial species to the treatment cows in this study. 
+
